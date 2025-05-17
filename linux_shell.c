@@ -9,6 +9,15 @@
 #include <errno.h>
 #include <pwd.h>       // Include for getpwuid 
 #include <sys/types.h> // Include for uid_t 
+#include <dirent.h> // For directory traversal
+
+
+#define HISTORY_FILE "cmd_history.txt"
+#define MAX_HISTORY 1000
+
+GPtrArray *command_history = NULL;
+int history_index = -1;
+
 
 // --- Globals ---
 GtkTextView *output_view;
@@ -16,7 +25,7 @@ GtkTextBuffer *output_buffer;
 GtkEntry *input_entry;
 GtkWindow *main_window;
 
-// --- Constants ---
+// --- Constants --- 
 #define READ_BUF_SIZE 4096
 #define MAX_ARGS 64
 
@@ -33,6 +42,145 @@ gboolean handle_builtin(int argc, char *args[]);
 gboolean reverse(int argc, char *args[]);
 gboolean countdown(int argc, char *args[]);
 void execute_external_command(int argc, char *args[], RedirectionInfo *redir);
+
+// --- Helper: Autocomplete Path Based on Prefix ---
+char *complete_path(const char *path_prefix) {
+    char *last_slash = strrchr(path_prefix, '/');
+    char dir_path[PATH_MAX];
+    const char *partial;
+
+    if (last_slash) {
+        strncpy(dir_path, path_prefix, last_slash - path_prefix);
+        dir_path[last_slash - path_prefix] = '\0';
+        partial = last_slash + 1;
+    } else {
+        strcpy(dir_path, ".");
+        partial = path_prefix;
+    }
+
+    DIR *dir = opendir(*dir_path ? dir_path : ".");
+    if (!dir) return NULL;
+
+    struct dirent *entry;
+    char *match = NULL;
+    size_t partial_len = strlen(partial);
+    while ((entry = readdir(dir)) != NULL) {
+        if (strncmp(entry->d_name, partial, partial_len) == 0) {
+            if (!match) {
+                match = g_strdup(entry->d_name);
+            } else {
+                // More than one match
+                g_free(match);
+                closedir(dir);
+                return NULL;
+            }
+        }
+    }
+    closedir(dir);
+
+    if (match) {
+        char *completed_path;
+        if (last_slash) {
+            size_t prefix_len = last_slash - path_prefix + 1;
+            completed_path = g_malloc(prefix_len + strlen(match) + 1);
+            strncpy(completed_path, path_prefix, prefix_len);
+            completed_path[prefix_len] = '\0';
+            strcat(completed_path, match);
+        } else {
+            completed_path = g_strdup(match);
+        }
+        g_free(match);
+        return completed_path;
+    }
+    return NULL;
+}
+
+
+
+
+//?arrow keys function
+// gboolean on_key_press(GtkWidget *widget, GdkEventKey *event, gpointer user_data) {
+//     if (!command_history || command_history->len == 0)
+//         return FALSE;
+
+//     if (event->keyval == GDK_KEY_Up) {
+//         if (history_index > 0)
+//             history_index--;
+//         const char *cmd = g_ptr_array_index(command_history, history_index);
+//         gtk_entry_set_text(GTK_ENTRY(widget), cmd);
+//         gtk_editable_set_position(GTK_EDITABLE(widget), -1);
+//         return TRUE;
+//     } else if (event->keyval == GDK_KEY_Down) {
+//         if (history_index < (int)command_history->len - 1) {
+//             history_index++;
+//             const char *cmd = g_ptr_array_index(command_history, history_index);
+//             gtk_entry_set_text(GTK_ENTRY(widget), cmd);
+//         } else {
+//             gtk_entry_set_text(GTK_ENTRY(widget), "");
+//             history_index = command_history->len;
+//         }
+//         gtk_editable_set_position(GTK_EDITABLE(widget), -1);
+//         return TRUE;
+//     }
+
+//     return FALSE;
+// }
+
+gboolean on_key_press(GtkWidget *widget, GdkEventKey *event, gpointer user_data) {
+    if (!command_history || command_history->len == 0)
+        return FALSE;
+
+    if (event->keyval == GDK_KEY_Up) {
+        if (history_index > 0)
+            history_index--;
+        const char *cmd = g_ptr_array_index(command_history, history_index);
+        gtk_entry_set_text(GTK_ENTRY(widget), cmd);
+        gtk_editable_set_position(GTK_EDITABLE(widget), -1);
+        return TRUE;
+    } else if (event->keyval == GDK_KEY_Down) {
+        if (history_index < (int)command_history->len - 1) {
+            history_index++;
+            const char *cmd = g_ptr_array_index(command_history, history_index);
+            gtk_entry_set_text(GTK_ENTRY(widget), cmd);
+        } else {
+            gtk_entry_set_text(GTK_ENTRY(widget), "");
+            history_index = command_history->len;
+        }
+        gtk_editable_set_position(GTK_EDITABLE(widget), -1);
+        return TRUE;
+    } else if (event->keyval == GDK_KEY_Tab) {
+        const char *current_text = gtk_entry_get_text(GTK_ENTRY(widget));
+        if (!current_text || strlen(current_text) == 0) return TRUE;
+
+        int cursor_pos = gtk_editable_get_position(GTK_EDITABLE(widget));
+        if (cursor_pos <= 0) return TRUE;
+
+        // Duplicate up to cursor position
+        char *before_cursor = g_strndup(current_text, cursor_pos);
+
+        // Find last space to extract the word to complete
+        char *last_space = strrchr(before_cursor, ' ');
+        const char *word_to_complete = last_space ? last_space + 1 : before_cursor;
+
+        char *completed = complete_path(word_to_complete);
+        if (completed) {
+            GString *new_text = g_string_new_len(current_text, last_space ? (last_space - current_text + 1) : 0);
+            g_string_append(new_text, completed);
+            g_free(completed);
+
+            gtk_entry_set_text(GTK_ENTRY(widget), new_text->str);
+            gtk_editable_set_position(GTK_EDITABLE(widget), -1);
+            g_string_free(new_text, TRUE);
+        }
+
+        g_free(before_cursor);
+        return TRUE; // Handled Tab key
+    }
+
+    return FALSE;
+}
+
+
 void on_entry_activate(GtkEntry *entry, gpointer user_data);
 void cleanup_args(int argc, char *args[], RedirectionInfo *redir);
 int parse_command(char *command_line, char *args[], RedirectionInfo *redir);
@@ -390,7 +538,20 @@ void on_entry_activate(GtkEntry *entry, gpointer user_data) {
     } else {
         append_output("\n");
     }
-
+    //?for arrow function
+    if (strlen(start) > 0) {
+        // Add to in-memory history
+        g_ptr_array_add(command_history, g_strdup(start));
+        history_index = command_history->len;
+    
+        // Append to history file
+        FILE *history_fp = fopen(HISTORY_FILE, "a");
+        if (history_fp) {
+            fprintf(history_fp, "%s\n", start);
+            fclose(history_fp);
+        }
+    }
+    
     g_free(command_line);
     gtk_entry_set_text(entry, "");
 
@@ -402,6 +563,11 @@ void on_entry_activate(GtkEntry *entry, gpointer user_data) {
 
 // --- Main Function --- (No changes)
 int main(int argc, char *argv[]) {
+
+
+    
+
+
     gtk_init(&argc, &argv);
     main_window = GTK_WINDOW(gtk_window_new(GTK_WINDOW_TOPLEVEL));
     gtk_window_set_title(main_window, "Linux C Shell");
@@ -425,6 +591,24 @@ int main(int argc, char *argv[]) {
     update_prompt_and_title();
     gtk_widget_show_all(GTK_WIDGET(main_window));
     gtk_widget_grab_focus(GTK_WIDGET(input_entry));
+    // --- Load command history from file ---
+       //?for arrow key function
+    command_history = g_ptr_array_new_with_free_func(g_free);
+        FILE *history_fp = fopen(HISTORY_FILE, "r");
+        if (history_fp) {
+            char *line = NULL;
+            size_t len = 0;
+            while (getline(&line, &len, history_fp) != -1) {
+            // Remove trailing newline
+                line[strcspn(line, "\n")] = '\0';
+                g_ptr_array_add(command_history, g_strdup(line));
+            }
+            free(line);
+            fclose(history_fp);
+        }
+
+        g_signal_connect(input_entry, "activate", G_CALLBACK(on_entry_activate), NULL);
+        g_signal_connect(input_entry, "key-press-event", G_CALLBACK(on_key_press), NULL);
     gtk_main();
     return 0;
 }
