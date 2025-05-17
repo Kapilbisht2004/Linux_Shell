@@ -7,6 +7,8 @@
 #include <sys/wait.h>
 #include <limits.h>
 #include <errno.h>
+#include <pwd.h>       // Include for getpwuid 
+#include <sys/types.h> // Include for uid_t 
 
 // --- Globals ---
 GtkTextView *output_view;
@@ -28,6 +30,8 @@ typedef struct {
 void append_output(const char *text);
 void update_prompt_and_title(void);
 gboolean handle_builtin(int argc, char *args[]);
+gboolean reverse(int argc, char *args[]);
+gboolean countdown(int argc, char *args[]);
 void execute_external_command(int argc, char *args[], RedirectionInfo *redir);
 void on_entry_activate(GtkEntry *entry, gpointer user_data);
 void cleanup_args(int argc, char *args[], RedirectionInfo *redir);
@@ -44,21 +48,52 @@ void append_output(const char *text) {
 }
 
 // --- Helper: Update Prompt/Title --- (No changes)
+// --- Helper: Update Prompt/Title ---
 void update_prompt_and_title(void) {
-    char cwd[PATH_MAX];
-    char prompt[PATH_MAX + 4];
+    char cwd_buf[PATH_MAX];
+    char hostname[HOST_NAME_MAX + 1] = "?"; // Default if gethostname fails
+    char username[LOGIN_NAME_MAX + 1] = "?"; // Default if getpwuid fails
+    // Allocate enough space: user + @ + host + : + cwd + $ + space + null
+    char prompt[LOGIN_NAME_MAX + HOST_NAME_MAX + PATH_MAX + 5];
     char title[PATH_MAX + 20];
+    char *cwd_ptr = "?"; // Default if getcwd fails
 
-    if (getcwd(cwd, sizeof(cwd)) != NULL) {
-        snprintf(prompt, sizeof(prompt), "%s> ", cwd);
-        snprintf(title, sizeof(title), "Linux C Shell - %s", cwd);
+    // --- Get Username ---
+    uid_t uid = getuid();
+    struct passwd *pw = getpwuid(uid);
+    if (pw && pw->pw_name) {
+        strncpy(username, pw->pw_name, sizeof(username) - 1);
+        username[sizeof(username) - 1] = '\0'; // Ensure null termination
     } else {
-        perror("getcwd() error");
-        snprintf(prompt, sizeof(prompt), "?> ");
-        snprintf(title, sizeof(title), "Linux C Shell - Error");
+         // Optionally log getpwuid error, but keep username as "?"
+         strcpy(username, "user"); // Or provide a simple default
     }
 
-    append_output("\n");
+    // --- Get Hostname ---
+    if (gethostname(hostname, sizeof(hostname)) == 0) {
+        hostname[sizeof(hostname) - 1] = '\0'; // Ensure null termination
+    } else {
+         // Optionally log gethostname error, but keep hostname as "?"
+         strcpy(hostname, "host"); // Or provide a simple default
+    }
+
+    // --- Get Current Directory ---
+    if (getcwd(cwd_buf, sizeof(cwd_buf)) != NULL) {
+        cwd_ptr = cwd_buf;
+        // Set window title based on CWD
+        snprintf(title, sizeof(title), "Linux C Shell - %s", cwd_ptr);
+    } else {
+        perror("getcwd() error");
+        cwd_ptr = "?"; // Use "?" if getcwd fails
+        // Set window title indicating error
+        snprintf(title, sizeof(title), "Linux C Shell - Error getting CWD");
+    }
+
+    // --- Format Prompt ---
+    snprintf(prompt, sizeof(prompt), "%s@%s : %s$ ", username, hostname, cwd_ptr);
+
+    // --- Update UI ---
+    append_output("\n"); // Add newline before prompt
     append_output(prompt);
     gtk_window_set_title(main_window, title);
 }
@@ -120,6 +155,60 @@ void cleanup_args(int argc, char *args[], RedirectionInfo *redir) {
     }
 }
 
+// Custom command to reverse a string
+gboolean reverse(int argc, char *args[]) {
+    if (argc < 2) {
+        append_output("Usage: reverse <string>\n");
+        return TRUE;
+    }
+
+    char *input = args[1];
+    int length = strlen(input);
+    char reversed[length + 1];
+
+    for (int i = 0; i < length; i++) {
+        reversed[i] = input[length - i - 1];
+    }
+    reversed[length] = '\0'; // Null terminate the string
+
+    append_output("Reversed: ");
+    append_output(reversed);
+    append_output("\n");
+
+    return TRUE;
+}
+
+// Custom command for countdown
+gboolean countdown(int argc, char *args[]) {
+    if (argc < 2) {
+        append_output("Usage: countdown <seconds>\n");
+        return TRUE;
+    }
+
+    int seconds = atoi(args[1]);
+    if (seconds <= 0) {
+        append_output("Please provide a positive number of seconds.\n");
+        return TRUE;
+    }
+
+    append_output("Starting countdown:\n");
+    for (int i = seconds; i >= 0; i--) {
+        append_output("Time left: ");
+        char time_left[10];
+        snprintf(time_left, sizeof(time_left), "%d", i);
+        append_output(time_left);
+        append_output("\n");
+        // Allow GTK to update the UI
+        while (gtk_events_pending()) {
+            gtk_main_iteration();
+        }
+
+        sleep(1);
+    }
+
+    append_output("Countdown complete!\n");
+    return TRUE;
+}
 
 // --- Handle Built-in Commands --- (No changes)
 gboolean handle_builtin(int argc, char *args[]) {
@@ -137,6 +226,15 @@ gboolean handle_builtin(int argc, char *args[]) {
         return TRUE;
     }
 
+    if (strcmp(args[0], "countdown") == 0) {
+        countdown(argc,args);
+        return TRUE;
+    }
+    if (strcmp(args[0], "reverse") == 0) {
+        reverse(argc,args);
+        return TRUE;
+    }
+    
     if (strcmp(args[0], "cd") == 0) {
         const char *target_dir = NULL;
         if (argc > 1) {
