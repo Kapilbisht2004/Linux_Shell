@@ -18,14 +18,20 @@ GtkWindow *main_window;
 #define READ_BUF_SIZE 4096
 #define MAX_ARGS 64
 
+typedef struct {
+    char *input_file;
+    char *output_file;
+    gboolean append_output;
+} RedirectionInfo;
+
 // --- Function Prototypes ---
 void append_output(const char *text);
 void update_prompt_and_title(void);
 gboolean handle_builtin(int argc, char *args[]);
-void execute_external_command(int argc, char *args[]);
+void execute_external_command(int argc, char *args[], RedirectionInfo *redir);
 void on_entry_activate(GtkEntry *entry, gpointer user_data);
-void cleanup_args(int argc, char *args[]);
-int parse_command(char *command_line, char *args[]);
+void cleanup_args(int argc, char *args[], RedirectionInfo *redir);
+int parse_command(char *command_line, char *args[], RedirectionInfo *redir);
 
 // --- Helper: Append Text --- (No changes)
 void append_output(const char *text) {
@@ -59,37 +65,61 @@ void update_prompt_and_title(void) {
 
 // --- Helper: Parse Command Line ---
 // Uses g_strdup now
-int parse_command(char *command_line, char *args[]) {
+int parse_command(char *command_line, char *args[], RedirectionInfo *redir) {
     int argc = 0;
     char *token;
     char *saveptr;
 
+    redir->input_file = NULL;
+    redir->output_file = NULL;
+    redir->append_output = FALSE;
+
     token = strtok_r(command_line, " \t\n\r", &saveptr);
     while (token != NULL && argc < MAX_ARGS - 1) {
-        // *** Use g_strdup *** // GLib Change
-        args[argc] = g_strdup(token);
-        if (args[argc] == NULL) {
-             g_error("g_strdup failed: Out of memory"); // g_error terminates
-             // cleanup_args(argc, args); // Not strictly needed after g_error
-             // return -1;
+        if (strcmp(token, "<") == 0) {
+            token = strtok_r(NULL, " \t\n\r", &saveptr);
+            if (token != NULL) redir->input_file = g_strdup(token);
+        } else if (strcmp(token, ">") == 0) {
+            token = strtok_r(NULL, " \t\n\r", &saveptr);
+            if (token != NULL) {
+                redir->output_file = g_strdup(token);
+                redir->append_output = FALSE;
+            }
+        } else if (strcmp(token, ">>") == 0) {
+            token = strtok_r(NULL, " \t\n\r", &saveptr);
+            if (token != NULL) {
+                redir->output_file = g_strdup(token);
+                redir->append_output = TRUE;
+            }
+        } else {
+            args[argc] = g_strdup(token);
+            if (args[argc] == NULL) g_error("g_strdup failed: Out of memory");
+            argc++;
         }
-        argc++;
         token = strtok_r(NULL, " \t\n\r", &saveptr);
     }
     args[argc] = NULL;
     return argc;
 }
 
+
 // --- Helper: Free Memory Allocated by parse_command ---
 // Uses g_free now
-void cleanup_args(int argc, char *args[]) {
-     if (!args) return;
-     for (int i = 0; i < argc; i++) {
-          // *** Use g_free *** // GLib Change
-          g_free(args[i]);
-          args[i] = NULL;
-     }
+void cleanup_args(int argc, char *args[], RedirectionInfo *redir) {
+    if (!args) return;
+    for (int i = 0; i < argc; i++) {
+        g_free(args[i]);
+        args[i] = NULL;
+    }
+    if (redir) {
+        g_free(redir->input_file);
+        g_free(redir->output_file);
+        redir->input_file = NULL;
+        redir->output_file = NULL;
+        redir->append_output = FALSE;
+    }
 }
+
 
 // --- Handle Built-in Commands --- (No changes)
 gboolean handle_builtin(int argc, char *args[]) {
@@ -129,11 +159,8 @@ gboolean handle_builtin(int argc, char *args[]) {
 }
 
 // --- Execute External Command --- (No changes)
-void execute_external_command(int argc, char *args[]) {
-     // ... (function unchanged) ...
-    if (argc <= 0 || args == NULL || args[0] == NULL) {
-        return;
-    }
+void execute_external_command(int argc, char *args[], RedirectionInfo *redir) {
+    if (argc <= 0 || args == NULL || args[0] == NULL) return;
 
     int pipe_fd[2];
     pid_t pid;
@@ -155,17 +182,37 @@ void execute_external_command(int argc, char *args[]) {
 
     if (pid == 0) { // Child
         close(pipe_fd[0]);
-        if (dup2(pipe_fd[1], STDOUT_FILENO) == -1) {
-            perror("dup2 stdout failed"); close(pipe_fd[1]); _exit(EXIT_FAILURE);
+
+        // Handle input redirection
+        if (redir->input_file) {
+            FILE *in = fopen(redir->input_file, "r");
+            if (!in) {
+                perror("input redirection failed");
+                _exit(EXIT_FAILURE);
+            }
+            dup2(fileno(in), STDIN_FILENO);
+            fclose(in);
         }
-        if (dup2(pipe_fd[1], STDERR_FILENO) == -1) {
-             perror("dup2 stderr failed"); close(pipe_fd[1]); _exit(EXIT_FAILURE);
+
+        // Handle output redirection
+        if (redir->output_file) {
+            FILE *out = fopen(redir->output_file, redir->append_output ? "a" : "w");
+            if (!out) {
+                perror("output redirection failed");
+                _exit(EXIT_FAILURE);
+            }
+            dup2(fileno(out), STDOUT_FILENO);
+            dup2(fileno(out), STDERR_FILENO);
+            fclose(out);
+        } else {
+            dup2(pipe_fd[1], STDOUT_FILENO);
+            dup2(pipe_fd[1], STDERR_FILENO);
         }
+
         close(pipe_fd[1]);
         execvp(args[0], args);
         perror(args[0]);
         _exit(EXIT_FAILURE);
-
     } else { // Parent
         close(pipe_fd[1]);
         char buffer[READ_BUF_SIZE];
@@ -173,31 +220,28 @@ void execute_external_command(int argc, char *args[]) {
         while ((bytes_read = read(pipe_fd[0], buffer, sizeof(buffer) - 1)) > 0) {
             buffer[bytes_read] = '\0';
             append_output(buffer);
-            while (gtk_events_pending()) { gtk_main_iteration(); }
+            while (gtk_events_pending()) gtk_main_iteration();
         }
         if (bytes_read == -1) {
-             perror("read from pipe failed"); append_output("\nError reading command output.\n");
+            perror("read failed");
+            append_output("\nError reading command output.\n");
         }
         close(pipe_fd[0]);
+
         int status;
-        if (waitpid(pid, &status, 0) == -1) {
-            perror("waitpid failed"); append_output("\nError waiting for child process.\n");
-        } else {
-            if (WIFEXITED(status)) {
-                int exit_code = WEXITSTATUS(status);
-                if (exit_code != 0) {
-                    char status_msg[64];
-                    snprintf(status_msg, sizeof(status_msg), "\nProcess exited with status %d", exit_code);
-                    append_output(status_msg);
-                }
-            } else if (WIFSIGNALED(status)) {
-                 char signal_msg[64];
-                 snprintf(signal_msg, sizeof(signal_msg), "\nProcess terminated by signal %d", WTERMSIG(status));
-                 append_output(signal_msg);
-            }
+        waitpid(pid, &status, 0);
+        if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+            char msg[64];
+            snprintf(msg, sizeof(msg), "\nProcess exited with status %d", WEXITSTATUS(status));
+            append_output(msg);
+        } else if (WIFSIGNALED(status)) {
+            char msg[64];
+            snprintf(msg, sizeof(msg), "\nProcess terminated by signal %d", WTERMSIG(status));
+            append_output(msg);
         }
     }
 }
+
 
 // --- Signal Handler for Input Entry ---
 // Uses g_strdup and g_free now
@@ -207,14 +251,14 @@ void on_entry_activate(GtkEntry *entry, gpointer user_data) {
     const char *command_const = gtk_entry_get_text(entry);
     if (!command_const) return;
 
-    // *** Use g_strdup *** // GLib Change
+    // Duplicate input safely
     char *command_line = g_strdup(command_const);
     if (!command_line) {
-        g_error("g_strdup failed: Out of memory"); // Terminate on critical error
+        g_error("g_strdup failed: Out of memory");
         return;
     }
 
-    // Trim leading/trailing whitespace
+    // Trim whitespace
     char *start = command_line;
     while (g_ascii_isspace(*start)) start++;
     char *end = start + strlen(start) - 1;
@@ -229,37 +273,34 @@ void on_entry_activate(GtkEntry *entry, gpointer user_data) {
         append_output("\n");
 
         char *args[MAX_ARGS];
-        int argc = parse_command(start, args); // Uses g_strdup internally now
+        RedirectionInfo redir = {0};  // Init redirection info
 
-        if (argc < 0) { // Error already reported by g_error in parse_command
-            // append_output("Error parsing command.\n"); // No longer needed
-        } else {
-            // Keep track if 'clear' was called to potentially skip prompt
-            gboolean was_clear = (argc > 0 && strcmp(args[0],"clear") == 0);
+        int argc = parse_command(start, args, &redir);
+        if (argc >= 0) {
+            gboolean was_clear = (argc > 0 && strcmp(args[0], "clear") == 0);
 
             if (!handle_builtin(argc, args)) {
-                execute_external_command(argc, args);
+                execute_external_command(argc, args, &redir);
             }
 
-            if(was_clear) { // Skip prompt only if clear was the command
+            if (was_clear) {
                 show_prompt = FALSE;
             }
 
-            // Cleanup memory allocated by parse_command (using g_free now)
-            cleanup_args(argc, args);
+            cleanup_args(argc, args, &redir);
         }
     } else {
-         append_output("\n");
+        append_output("\n");
     }
 
-    // *** Use g_free *** // GLib Change
     g_free(command_line);
     gtk_entry_set_text(entry, "");
 
     if (show_prompt) {
-         update_prompt_and_title();
+        update_prompt_and_title();
     }
 }
+
 
 // --- Main Function --- (No changes)
 int main(int argc, char *argv[]) {
