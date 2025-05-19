@@ -108,14 +108,25 @@ void append_colored_text(const char *text, const char *tag) {
 
 void update_prompt() {
     char cwd[1024];
-    if (getcwd(cwd, sizeof(cwd)) != NULL) {
-        char prompt[2048];
-        snprintf(prompt, sizeof(prompt), "[user@gtk-shell %s]$ ", cwd);
-        append_colored_text(prompt, "prompt");
-    } else {
-        append_colored_text(PROMPT_TEXT, "prompt");
+    char hostname[256];
+    char *username;
+
+    if (getcwd(cwd, sizeof(cwd)) == NULL) {
+        strcpy(cwd, "~");
     }
+
+    if (gethostname(hostname, sizeof(hostname)) != 0) {
+        strcpy(hostname, "gtk-shell");
+    }
+
+    struct passwd *pw = getpwuid(getuid());
+    username = pw ? pw->pw_name : "user";
+
+    char prompt[2048];
+    snprintf(prompt, sizeof(prompt), "[%s@%s %s]$ ", username, hostname, cwd);
+    append_colored_text(prompt, "prompt");
 }
+
 
 /* Shell Functions */
 int parse_command(char *command_line, char *args[], RedirectionInfo *redir) {
@@ -412,6 +423,20 @@ gboolean on_key_press(GtkWidget *widget, GdkEventKey *event, gpointer user_data)
             return TRUE;
         }
     }
+if (event->keyval == GDK_KEY_BackSpace) {
+    GtkTextIter start, end;
+    // Get iterator from input_mark (input start) to buffer end (current cursor)
+    gtk_text_buffer_get_iter_at_mark(text_buffer, &start, input_mark);
+    gtk_text_buffer_get_end_iter(text_buffer, &end);
+
+    if (gtk_text_iter_compare(&start, &end) < 0) {
+        // Delete the last character before cursor
+        GtkTextIter del_start = end;
+        gtk_text_iter_backward_char(&del_start);
+        gtk_text_buffer_delete(text_buffer, &del_start, &end);
+    }
+    return TRUE;  // Event handled
+}
 
     if (event->keyval == GDK_KEY_Return) {
         handle_enter();
